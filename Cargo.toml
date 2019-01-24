@@ -1,0 +1,9 @@
+[package]
+name = "horrible-rust"
+version = "0.1.0"
+authors = ["snow <evaldas.tyla@gmail.com>"]
+edition = "2018"
+
+[dependencies]
+rss = { version = "*", features = ["from_url"] }
+rusqlite = { version = "*", features = ["bundled"] }
