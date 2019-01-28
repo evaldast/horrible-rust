@@ -7,3 +7,6 @@ edition = "2018"
 [dependencies]
 rss = { version = "*", features = ["from_url"] }
 rusqlite = { version = "*", features = ["bundled"] }
+kuchiki = "0.7.2"
+reqwest = "0.9.9"
+failure = "0.1.5"
