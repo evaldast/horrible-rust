@@ -1,3 +1,4 @@
+extern crate dialoguer;
 extern crate kuchiki;
 extern crate regex;
 extern crate reqwest;
@@ -5,20 +6,18 @@ extern crate rss;
 extern crate rusqlite;
 extern crate tempdir;
 
+use dialoguer::{theme::ColorfulTheme, theme::SelectionStyle, Checkboxes, Select};
 use failure::Error;
 use kuchiki::traits::*;
 use kuchiki::*;
 use regex::Regex;
 use rss::Channel;
-use rusqlite::types::ToSql;
 use rusqlite::{Connection, NO_PARAMS};
 use std::collections::HashMap;
-use std::env;
 use std::fs::File;
-use std::io::{self, copy};
+use std::io;
 use std::path;
 use std::process::Command;
-use std::thread;
 use tempdir::TempDir;
 
 #[macro_use]
@@ -83,16 +82,71 @@ impl Str for Resolution {
 }
 
 fn main() {
-    match process() {
-        Ok(_) => println!("Success"),
+    let sql_conn = Connection::open("main.db").unwrap();
+    //let sql_conn = Connection::open_in_memory()?;
+
+    match load_data(&sql_conn) {
+        Ok(_) => println!("Load success"),
         Err(e) => println!("{}", e),
+    }
+
+    let shows = load_shows(&sql_conn).unwrap();
+
+    let values: Vec<&Show> = shows
+        .values()
+        .filter(|show| show.subscribed == Some(1))
+        .collectcar();
+
+    for value in values {
+        println!("{:?}", value)
+    }
+
+    //prompt_menu(all_shows);
+
+    handle_user();
+}
+
+fn handle_user() {
+    let selections = &[
+        "Available Subscriptions",
+        "My Subscriptions",
+        "New Episodes",
+    ];
+
+    match prompt_menu(selections) {
+        0 => prompt_menu_current_season(),
+        1 => println!("{}", selections[1]),
+        2 => println!("{}", selections[2]),
+        _ => println!("Fail"),
     }
 }
 
-fn process() -> Result<String, Error> {
-    //let sql_conn = Connection::open_in_memory()?;
-    let sql_conn = Connection::open("main.db")?;
+fn prompt_menu(selections: &[&'static str]) -> usize {
+    Select::with_theme(&ColorfulTheme::default())
+        .with_prompt("Choose an option")
+        .default(0)
+        .items(&selections[..])
+        .interact()
+        .unwrap()
+}
 
+fn prompt_menu_current_season() {
+    let current_shows = fetch_current_season_titles().unwrap();
+    let current_shows: Vec<&str> = current_shows.iter().map(AsRef::as_ref).collect();
+    let current_shows: &[&str] = &current_shows;
+
+    let checks = Checkboxes::with_theme(&ColorfulTheme::default())
+        .with_prompt("Pick your subscriptions")
+        .items(&current_shows[..])
+        .interact()
+        .unwrap();
+
+    for check in checks {
+        println! {"{}", current_shows[check]};
+    }
+}
+
+fn load_data(sql_conn: &Connection) -> Result<(), Error> {
     initialize_sql_tables(&sql_conn)?;
 
     let download_dir = TempDir::new("horrible_rust")?;
@@ -117,14 +171,7 @@ fn process() -> Result<String, Error> {
         )?;
     }
 
-    let shows = load_shows(&sql_conn)?;
-
-    for show in shows.keys() {
-        let printable = shows.values();
-        println!("{:?}", printable);
-    }
-
-    return Ok("".to_string());
+    Ok(())
 }
 
 fn initialize_sql_tables(conn: &Connection) -> Result<(), Error> {
@@ -245,8 +292,9 @@ fn load_shows(conn: &Connection) -> Result<HashMap<String, Show>, Error> {
     let mut current_episodes_select = conn.prepare(
         "SELECT s.title, s.subscribed, e.title, e.watched, e.resolution, e.torrent_link
             FROM shows as s
-            JOIN episodes as e ON s.id = e.show_id",
+            LEFT JOIN episodes as e ON s.id = e.show_id",
     )?;
+
     current_episodes_select
         .query_and_then(NO_PARAMS, |row| -> Result<(), rusqlite::Error> {
             let episode = Episode {
