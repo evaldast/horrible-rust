@@ -20,7 +20,6 @@ use std::path;
 use std::process::Command;
 use std::thread;
 use tempdir::TempDir;
-use std::cell::Cell;
 
 #[macro_use]
 extern crate failure;
@@ -48,6 +47,15 @@ struct Episode {
     watched: Option<u8>,
     resolution: Resolution,
     torrent_link: String,
+}
+
+impl Show {
+    fn add_show(&mut self, ep: Episode) {
+        match self.episodes {
+            Some(ref mut episodes) => episodes.push(ep),
+            _ => self.episodes = Some(vec![ep]),
+        }
+    }
 }
 
 trait Str {
@@ -94,46 +102,27 @@ fn process() -> Result<String, Error> {
         sql_conn.execute("INSERT OR IGNORE INTO shows (title) VALUES (?1)", &[title])?;
     }
 
-    //    let episodes = fetch_episodes()?;
-    //
-    //    for ep in episodes {
-    //        sql_conn.execute(
-    //            "INSERT INTO episodes (show_id, title, resolution, torrent_link)
-    //                    VALUES ((SELECT id FROM shows WHERE title = '?1'), '?2', '?3', '?4')",
-    //            &[
-    //                parse_resolution_from_title(&ep.title),
-    //                &ep.title as &ToSql,
-    //                &ep.resolution.to_str().unwrap(),
-    //                &ep.torrent_link
-    //            ]
-    //        )?;
-    //    }
+    let episodes = fetch_episodes()?;
 
-    // for episode in episode_iter {
-    //     let episode = episode?;
-    //     println!("Found episode {:?}", episode);
-    //     // download_torrent(&download_dir, &episode.torrent_link);
-    // }
+    for ep in episodes {
+        sql_conn.execute(
+            "INSERT OR IGNORE INTO episodes (show_id, title, resolution, torrent_link)
+                        VALUES ((SELECT id FROM shows WHERE title = ?1), ?2, ?3, ?4)",
+            &[
+                &parse_show_name_from_torrent_title(&ep.title)?,
+                &ep.title,
+                parse_resolution_from_title(&ep.title)?.to_str().unwrap(),
+                &ep.torrent_link,
+            ],
+        )?;
+    }
 
-    // let mut wanted_episode_select =
-    //     sql_conn.prepare("SELECT id, title, watched, resolution, torrent_link FROM episodes WHERE torrent_link = ?")?;
-    // let wanted_episode_iter = wanted_episode_select.query_map(&[input.trim()], |row| Episode {
-    //     id: row.get(0),
-    //     title: row.get(1),
-    //     watched: row.get(2),
-    //     resolution: Resolution::from_string(row.get(3)).unwrap(),
-    //     torrent_link: row.get(4),
-    // })?;
+    let shows = load_shows(&sql_conn)?;
 
-    // for episode in wanted_episode_iter {
-    //     let episode = episode?;
-    //     println!("Found wanted episode {:?}", episode);
-    //     // download_torrent(&download_dir, &episode.torrent_link);
-    // }
-
-    // for title in fetch_current_season_titles()? {
-    //     println!("Found title {:?}", title);
-    // }
+    for show in shows.keys() {
+        let printable = shows.values();
+        println!("{:?}", printable);
+    }
 
     return Ok("".to_string());
 }
@@ -253,41 +242,42 @@ fn open_episode(player_path: &str, torrent_path: &str) {
 
 fn load_shows(conn: &Connection) -> Result<HashMap<String, Show>, Error> {
     let mut shows: HashMap<String, Show> = HashMap::new();
-    let mut current_episodes_select =
-        conn.prepare("SELECT s.title, s.subscribed, e.title, e.watched, e.resolution, e.torrent_link FROM shows as s
-            JOIN episodes as e ON s.id = e.show_id	")?;
-    let episode_iter = current_episodes_select.query_map(NO_PARAMS, |row| {
-        let episode = Episode {
-            id: None,
-            show_id: None,
-            title: row.get(2),
-            watched: row.get(3),
-            resolution: Resolution::from_string(row.get(4)).unwrap(),
-            torrent_link: row.get(5),
-        };
+    let mut current_episodes_select = conn.prepare(
+        "SELECT s.title, s.subscribed, e.title, e.watched, e.resolution, e.torrent_link
+            FROM shows as s
+            JOIN episodes as e ON s.id = e.show_id",
+    )?;
+    current_episodes_select
+        .query_and_then(NO_PARAMS, |row| -> Result<(), rusqlite::Error> {
+            let episode = Episode {
+                id: None,
+                show_id: None,
+                title: row.get(2),
+                watched: row.get(3),
+                resolution: Resolution::from_string(row.get(4)).unwrap(),
+                torrent_link: row.get(5),
+            };
+            let show_title: String = row.get(0);
 
-        let show_title: String = row.get(0);
+            match shows.get_mut(&show_title) {
+                Some(show) => show.add_show(episode),
+                None => {
+                    shows.insert(
+                        show_title.clone(),
+                        Show {
+                            title: show_title,
+                            subscribed: row.get(1),
+                            episodes: Some(vec![episode]),
+                            id: None,
+                        },
+                    );
+                }
+            };
 
-        match shows.get(&show_title) {
-            Some(show) => match &show.episodes {
-                Some(mut episodes) => episodes.push(episode),
-                _ => ()
-            },
-            _ => {
-                shows.insert(
-                    row.get(0),
-                    Show {
-                        title: show_title,
-                        subscribed: row.get(1),
-                        episodes: Some(vec![episode]),
-                        id: None,
-                    },
-                );
-
-                return ()
-            },
-        }
-    })?;
+            Ok(())
+        })
+        .unwrap()
+        .count();
 
     return Ok(shows);
 }
