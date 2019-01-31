@@ -50,6 +50,10 @@ struct Episode {
 
 impl Show {
     fn add_show(&mut self, ep: Episode) {
+        if ep.title == "NULL" {
+            return;
+        }
+
         match self.episodes {
             Some(ref mut episodes) => episodes.push(ep),
             _ => self.episodes = Some(vec![ep]),
@@ -95,7 +99,7 @@ fn main() {
     let values: Vec<&Show> = shows
         .values()
         .filter(|show| show.subscribed == Some(1))
-        .collectcar();
+        .collect();
 
     for value in values {
         println!("{:?}", value)
@@ -290,7 +294,7 @@ fn open_episode(player_path: &str, torrent_path: &str) {
 fn load_shows(conn: &Connection) -> Result<HashMap<String, Show>, Error> {
     let mut shows: HashMap<String, Show> = HashMap::new();
     let mut current_episodes_select = conn.prepare(
-        "SELECT s.title, s.subscribed, e.title, e.watched, e.resolution, e.torrent_link
+        "SELECT s.title, s.subscribed, COALESCE(e.title, 'NULL'), COALESCE(e.watched, 0), COALESCE(e.resolution, '480p'), COALESCE(e.torrent_link, 'NULL')
             FROM shows as s
             LEFT JOIN episodes as e ON s.id = e.show_id",
     )?;
