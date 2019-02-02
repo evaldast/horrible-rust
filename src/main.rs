@@ -4,6 +4,7 @@ extern crate regex;
 extern crate reqwest;
 extern crate rss;
 extern crate rusqlite;
+extern crate console;
 
 use dialoguer::{theme::ColorfulTheme, Checkboxes, Select};
 use failure::Error;
@@ -15,9 +16,14 @@ use rusqlite::{Connection, NO_PARAMS};
 use std::collections::HashMap;
 use std::process::Command;
 use std::thread;
+use console::{Emoji, style};
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 
 #[macro_use]
 extern crate failure;
+
+static TRUCK: Emoji = Emoji("🚚  ", "");
 
 #[derive(Debug)]
 struct Show {
@@ -82,6 +88,8 @@ impl Str for Resolution {
 }
 
 fn main() {
+    println!("{} {} {} {} {}", TRUCK, TRUCK, style("[LOADING..]").bold().dim(), TRUCK, TRUCK);
+
     let sql_conn = Connection::open("main.db").unwrap();
     //let sql_conn = Connection::open_in_memory()?;
 
@@ -89,6 +97,10 @@ fn main() {
         Ok(_) => println!("Load success"),
         Err(e) => println!("{}", e),
     }
+
+    thread::spawn(|| {
+        watch_feed();
+    });
 
     loop {
         let shows = load_shows(&sql_conn).unwrap();
@@ -176,6 +188,7 @@ fn handle_my_subscriptions(shows: HashMap<String, Show>, sql_conn: &Connection) 
         .iter()
         .filter(|ep| ep.title == episode_titles[episode_selection])
     {
+        println!("Loading episode {} {}", TRUCK, &episode.title);
         open_episode(episode.torrent_link.clone());
     }
 }
@@ -191,20 +204,24 @@ fn load_data(sql_conn: &Connection) -> Result<(), Error> {
 
     let episodes = fetch_episodes()?;
 
+    persist_new_episodes(&sql_conn, episodes);
+
+    Ok(())
+}
+
+fn persist_new_episodes(sql_conn: &Connection, episodes: Vec<Episode>) {
     for ep in episodes {
         sql_conn.execute(
             "INSERT OR IGNORE INTO episodes (show_id, title, resolution, torrent_link)
                         VALUES ((SELECT id FROM shows WHERE title = ?1), ?2, ?3, ?4)",
             &[
-                &parse_show_name_from_torrent_title(&ep.title)?,
+                &parse_show_name_from_torrent_title(&ep.title).unwrap(),
                 &ep.title,
-                parse_resolution_from_title(&ep.title)?.to_str().unwrap(),
+                parse_resolution_from_title(&ep.title).unwrap().to_str().unwrap(),
                 &ep.torrent_link,
             ],
-        )?;
+        ).unwrap();
     }
-
-    Ok(())
 }
 
 fn initialize_sql_tables(conn: &Connection) -> Result<(), Error> {
@@ -233,10 +250,32 @@ fn initialize_sql_tables(conn: &Connection) -> Result<(), Error> {
     Ok(())
 }
 
+fn watch_feed() {
+    let sql_conn = Connection::open("main.db").unwrap();
+    let mut current_feed_string = "".to_string();
+
+    loop {
+        let feed = Channel::from_url("https://nyaa.si/?page=rss&c=0_0&f=0&u=HorribleSubs").unwrap();        
+        let new_feed_string = feed.to_string();        
+
+        if (current_feed_string != new_feed_string) { // https://github.com/rust-syndication/rss/issues/74
+            persist_new_episodes(&sql_conn, map_feed_to_episodes(&feed));
+            current_feed_string = new_feed_string;
+        }
+
+        thread::sleep_ms(5000);
+    }        
+}
+
 fn fetch_episodes() -> Result<Vec<Episode>, Error> {
-    let channel = Channel::from_url("https://nyaa.si/?page=rss&c=0_0&f=0&u=HorribleSubs")?;
-    let episodes = channel
-        .items()
+    let feed = Channel::from_url("https://nyaa.si/?page=rss&c=0_0&f=0&u=HorribleSubs")?;
+    let episodes = map_feed_to_episodes(&feed);
+
+    Ok(episodes)
+}
+
+fn map_feed_to_episodes(feed: &Channel) -> Vec<Episode> {
+    feed.items()
         .iter()
         .map(|i| Episode {
             id: None,
@@ -246,9 +285,7 @@ fn fetch_episodes() -> Result<Vec<Episode>, Error> {
             resolution: parse_resolution_from_title(i.title().unwrap()).unwrap(),
             torrent_link: i.link().unwrap().to_string(),
         })
-        .collect();
-
-    Ok(episodes)
+        .collect()
 }
 
 fn parse_resolution_from_title(title: &str) -> Result<Resolution, Error> {
@@ -351,6 +388,8 @@ fn load_shows(conn: &Connection) -> Result<HashMap<String, Show>, Error> {
 }
 
 fn subscribe_to_show(sql_conn: &Connection, id: u32) {
+    println!("subscribing to id: {}", id);
+
     sql_conn
         .execute(
             "UPDATE shows
