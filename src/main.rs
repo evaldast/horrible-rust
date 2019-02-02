@@ -4,9 +4,8 @@ extern crate regex;
 extern crate reqwest;
 extern crate rss;
 extern crate rusqlite;
-extern crate tempdir;
 
-use dialoguer::{theme::ColorfulTheme, theme::SelectionStyle, Checkboxes, Select};
+use dialoguer::{theme::ColorfulTheme, Checkboxes, Select};
 use failure::Error;
 use kuchiki::traits::*;
 use kuchiki::*;
@@ -14,11 +13,8 @@ use regex::Regex;
 use rss::Channel;
 use rusqlite::{Connection, NO_PARAMS};
 use std::collections::HashMap;
-use std::fs::File;
-use std::io;
-use std::path;
 use std::process::Command;
-use tempdir::TempDir;
+use std::thread;
 
 #[macro_use]
 extern crate failure;
@@ -50,7 +46,7 @@ struct Episode {
 
 impl Show {
     fn add_show(&mut self, ep: Episode) {
-        if ep.title == "NULL" {
+        if ep.id == None {
             return;
         }
 
@@ -94,23 +90,13 @@ fn main() {
         Err(e) => println!("{}", e),
     }
 
-    let shows = load_shows(&sql_conn).unwrap();
-
-    let values: Vec<&Show> = shows
-        .values()
-        .filter(|show| show.subscribed == Some(1))
-        .collect();
-
-    for value in values {
-        println!("{:?}", value)
+    loop {
+        let shows = load_shows(&sql_conn).unwrap();
+        handle_user(shows, &sql_conn);
     }
-
-    //prompt_menu(all_shows);
-
-    handle_user();
 }
 
-fn handle_user() {
+fn handle_user(shows: HashMap<String, Show>, sql_conn: &Connection) {
     let selections = &[
         "Available Subscriptions",
         "My Subscriptions",
@@ -118,8 +104,8 @@ fn handle_user() {
     ];
 
     match prompt_menu(selections) {
-        0 => prompt_menu_current_season(),
-        1 => println!("{}", selections[1]),
+        0 => handle_available_subscriptions(shows, &sql_conn),
+        1 => handle_my_subscriptions(shows, &sql_conn),
         2 => println!("{}", selections[2]),
         _ => println!("Fail"),
     }
@@ -134,26 +120,69 @@ fn prompt_menu(selections: &[&'static str]) -> usize {
         .unwrap()
 }
 
-fn prompt_menu_current_season() {
-    let current_shows = fetch_current_season_titles().unwrap();
-    let current_shows: Vec<&str> = current_shows.iter().map(AsRef::as_ref).collect();
-    let current_shows: &[&str] = &current_shows;
+fn handle_available_subscriptions(shows: HashMap<String, Show>, sql_conn: &Connection) {
+    let titles: Vec<&str> = shows
+        .values()
+        .filter(|show| show.subscribed == Some(0))
+        .map(|show| show.title.as_ref())
+        .collect();
+    let titles: &[&str] = &titles;
 
     let checks = Checkboxes::with_theme(&ColorfulTheme::default())
         .with_prompt("Pick your subscriptions")
-        .items(&current_shows[..])
+        .items(&titles[..])
         .interact()
         .unwrap();
 
     for check in checks {
-        println! {"{}", current_shows[check]};
+        subscribe_to_show(&sql_conn, check as u32);
+        println! {"Subcribed to: {}", titles[check]};
+    }
+}
+
+fn handle_my_subscriptions(shows: HashMap<String, Show>, sql_conn: &Connection) {
+    let show_titles: Vec<&str> = shows
+        .values()
+        .filter(|show| show.subscribed == Some(1))
+        .map(|show| show.title.as_ref())
+        .collect();
+    let show_titles: &[&str] = &show_titles;
+
+    let show_selection = Select::with_theme(&ColorfulTheme::default())
+        .with_prompt("Choose a show")
+        .default(0)
+        .items(&show_titles[..])
+        .interact()
+        .unwrap();
+
+    let empty_vec: Vec<Episode> = vec![];
+    let show = shows.get(show_titles[show_selection]).unwrap();
+    let episodes = &show.episodes;
+    let episodes = match episodes {
+        Some(eps) => eps,
+        None => &empty_vec,
+    };
+    let episode_titles: Vec<&str> = episodes.iter().map(|ep| ep.title.as_ref()).collect();
+    let episode_titles: &[&str] = &episode_titles;
+
+    let episode_selection = Select::with_theme(&ColorfulTheme::default())
+        .with_prompt("Choose a show")
+        .default(0)
+        .items(&episode_titles[..])
+        .interact()
+        .unwrap();
+
+    for episode in episodes
+        .iter()
+        .filter(|ep| ep.title == episode_titles[episode_selection])
+    {
+        open_episode(episode.torrent_link.clone());
     }
 }
 
 fn load_data(sql_conn: &Connection) -> Result<(), Error> {
     initialize_sql_tables(&sql_conn)?;
 
-    let download_dir = TempDir::new("horrible_rust")?;
     let titles = fetch_current_season_titles()?;
 
     for title in titles {
@@ -260,56 +289,43 @@ fn fetch_document(url: &str) -> Result<NodeRef, Error> {
     Ok(kuchiki::parse_html().one(res.text()?))
 }
 
-fn download_torrent(directory: &TempDir, url: &str) -> Result<path::PathBuf, Error> {
-    let mut response = reqwest::get(url)?;
-    let file_name = response
-        .url()
-        .path_segments()
-        .and_then(|segments| segments.last())
-        .and_then(|name| if name.is_empty() { None } else { Some(name) })
-        .unwrap_or("tmp.bin");
-
-    println!("file to download: '{}'", file_name);
-
-    let file_path = directory.path().join(&file_name);
-
-    println!("will be located under: '{:?}'", &file_path);
-
-    let mut file = File::create(&file_path)?;
-
-    io::copy(&mut response, &mut file)?;
-
-    println!("Done");
-
-    Ok(file_path)
-}
-
-fn open_episode(player_path: &str, torrent_path: &str) {
-    let t = Command::new("C:\\Users\\snow\\AppData\\Local\\sodaplayer\\Soda Player.exe")
-        .args(&[torrent_path])
-        .output()
-        .expect("failed to execute process");
+fn open_episode(torrent_path: String) {
+    thread::spawn(|| {
+        Command::new("C:\\Users\\snow\\AppData\\Local\\sodaplayer\\Soda Player.exe")
+            .args(&[torrent_path])
+            .output()
+            .expect("failed to execute process");
+    });
 }
 
 fn load_shows(conn: &Connection) -> Result<HashMap<String, Show>, Error> {
     let mut shows: HashMap<String, Show> = HashMap::new();
     let mut current_episodes_select = conn.prepare(
-        "SELECT s.title, s.subscribed, COALESCE(e.title, 'NULL'), COALESCE(e.watched, 0), COALESCE(e.resolution, '480p'), COALESCE(e.torrent_link, 'NULL')
-            FROM shows as s
+        "SELECT s.id, s.title, s.subscribed, 
+            COALESCE(e.id, 0),
+            COALESCE(e.show_id, 0),
+            COALESCE(e.title, 'NULL'),
+            COALESCE(e.watched, 0),
+            COALESCE(e.resolution, '480p'),
+            COALESCE(e.torrent_link, 'NULL')
+        FROM shows as s
             LEFT JOIN episodes as e ON s.id = e.show_id",
     )?;
 
     current_episodes_select
         .query_and_then(NO_PARAMS, |row| -> Result<(), rusqlite::Error> {
             let episode = Episode {
-                id: None,
-                show_id: None,
-                title: row.get(2),
-                watched: row.get(3),
-                resolution: Resolution::from_string(row.get(4)).unwrap(),
-                torrent_link: row.get(5),
+                id: match row.get(3) {
+                    0 => None,
+                    x @ _ => Some(x),
+                },
+                show_id: row.get(4),
+                title: row.get(5),
+                watched: row.get(6),
+                resolution: Resolution::from_string(row.get(7)).unwrap(),
+                torrent_link: row.get(8),
             };
-            let show_title: String = row.get(0);
+            let show_title: String = row.get(1);
 
             match shows.get_mut(&show_title) {
                 Some(show) => show.add_show(episode),
@@ -317,10 +333,10 @@ fn load_shows(conn: &Connection) -> Result<HashMap<String, Show>, Error> {
                     shows.insert(
                         show_title.clone(),
                         Show {
+                            id: row.get(0),
                             title: show_title,
-                            subscribed: row.get(1),
+                            subscribed: row.get(2),
                             episodes: Some(vec![episode]),
-                            id: None,
                         },
                     );
                 }
@@ -332,4 +348,15 @@ fn load_shows(conn: &Connection) -> Result<HashMap<String, Show>, Error> {
         .count();
 
     return Ok(shows);
+}
+
+fn subscribe_to_show(sql_conn: &Connection, id: u32) {
+    sql_conn
+        .execute(
+            "UPDATE shows
+                SET subscribed = 1
+                WHERE id = ?",
+            &[id],
+        )
+        .unwrap();
 }
