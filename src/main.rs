@@ -413,7 +413,7 @@ fn load_shows(conn: &Connection) -> Result<HashMap<String, Show>, Error> {
         .unwrap()
         .count();
 
-    Ok(shows);
+    Ok(shows)
 }
 
 fn subscribe_to_show(sql_conn: &Connection, id: &u32) {
