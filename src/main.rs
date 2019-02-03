@@ -283,7 +283,7 @@ fn watch_feed() {
     let mut current_feed_string = "".to_string();
 
     loop {
-        let feed = Channel::from_url("https://nyaa.si/user/HorribleSubs?f=0&c=0_0&q=").unwrap();
+        let feed = Channel::from_url("https://nyaa.si/?page=rss&c=0_0&f=0&u=HorribleSubs").unwrap();
         let new_feed_string = feed.to_string();
 
         if current_feed_string != new_feed_string {
@@ -298,7 +298,6 @@ fn watch_feed() {
 
 fn fetch_episodes(show_title: &str) -> Result<Vec<Episode>, Error> {
     let feed_url = format!("https://nyaa.si/?page=rss&q={}&c=0_0&f=0&u=HorribleSubs", show_title.replace(" ", "+"));
-    println!("{}", &feed_url);
     let feed = Channel::from_url(&feed_url)?;
     let episodes = map_feed_to_episodes(&feed);
 
