@@ -100,7 +100,7 @@ fn main() {
     let sql_conn = Connection::open("main.db").unwrap();
     //let sql_conn = Connection::open_in_memory()?;
 
-    match load_data(&sql_conn) {
+    match initialize_data(&sql_conn) {
         Ok(_) => println!("Load success"),
         Err(e) => println!("{}", e),
     }
@@ -157,7 +157,8 @@ fn handle_available_subscriptions(shows: HashMap<String, Show>, sql_conn: &Conne
     for check in checks {
         let selected_show = shows.get(titles[check]).unwrap();
         subscribe_to_show(&sql_conn, &selected_show.id.unwrap());
-        println! {"Subcribed to: {}", &selected_show.title};
+        println! {"Subscribed to: {}", &selected_show.title};
+        persist_new_episodes(&sql_conn, fetch_episodes(&selected_show.title).unwrap());
     }
 }
 
@@ -201,7 +202,7 @@ fn handle_my_subscriptions(shows: HashMap<String, Show>) {
     open_episode(selected_episode.torrent_link.clone());
 }
 
-fn load_data(sql_conn: &Connection) -> Result<(), Error> {
+fn initialize_data(sql_conn: &Connection) -> Result<(), Error> {
     initialize_sql_tables(&sql_conn)?;
 
     let titles = fetch_current_season_titles()?;
@@ -211,10 +212,6 @@ fn load_data(sql_conn: &Connection) -> Result<(), Error> {
             "INSERT OR IGNORE INTO shows (title) VALUES (?1)",
             &[title.trim()],
         )?;
-    }
-
-    for title in &titles {
-        persist_new_episodes(&sql_conn, fetch_episodes(&title)?) 
     }
 
     Ok(())
@@ -297,7 +294,10 @@ fn watch_feed() {
 }
 
 fn fetch_episodes(show_title: &str) -> Result<Vec<Episode>, Error> {
-    let feed_url = format!("https://nyaa.si/?page=rss&q={}&c=0_0&f=0&u=HorribleSubs", show_title.replace(" ", "+"));
+    let feed_url = format!(
+        "https://nyaa.si/?page=rss&q={}&c=0_0&f=0&u=HorribleSubs",
+        show_title.replace(" ", "+")
+    );
     let feed = Channel::from_url(&feed_url)?;
     let episodes = map_feed_to_episodes(&feed);
 
