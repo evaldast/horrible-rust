@@ -1,11 +1,12 @@
+extern crate console;
 extern crate dialoguer;
 extern crate kuchiki;
 extern crate regex;
 extern crate reqwest;
 extern crate rss;
 extern crate rusqlite;
-extern crate console;
 
+use console::{style, Emoji};
 use dialoguer::{theme::ColorfulTheme, Checkboxes, Select};
 use failure::Error;
 use kuchiki::traits::*;
@@ -16,9 +17,6 @@ use rusqlite::{Connection, NO_PARAMS};
 use std::collections::HashMap;
 use std::process::Command;
 use std::thread;
-use console::{Emoji, style};
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 
 #[macro_use]
 extern crate failure;
@@ -30,17 +28,17 @@ struct Show {
     id: Option<u32>,
     title: String,
     subscribed: Option<u8>,
-    episodes: Option<Vec<Episode>>,
+    episodes: Option<HashMap<String, Episode>>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 enum Resolution {
     Q480p,
     Q720p,
     Q1080p,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct Episode {
     id: Option<u32>,
     show_id: Option<u32>,
@@ -57,8 +55,10 @@ impl Show {
         }
 
         match self.episodes {
-            Some(ref mut episodes) => episodes.push(ep),
-            _ => self.episodes = Some(vec![ep]),
+            Some(ref mut episodes) => {
+                episodes.insert(ep.title.clone(), ep);
+            }
+            _ => self.episodes = Some([(ep.title.clone(), ep)].iter().cloned().collect()),
         }
     }
 }
@@ -88,7 +88,14 @@ impl Str for Resolution {
 }
 
 fn main() {
-    println!("{} {} {} {} {}", TRUCK, TRUCK, style("[LOADING..]").bold().dim(), TRUCK, TRUCK);
+    println!(
+        "{} {} {} {} {}",
+        TRUCK,
+        TRUCK,
+        style("[LOADING..]").bold().dim(),
+        TRUCK,
+        TRUCK
+    );
 
     let sql_conn = Connection::open("main.db").unwrap();
     //let sql_conn = Connection::open_in_memory()?;
@@ -117,7 +124,7 @@ fn handle_user(shows: HashMap<String, Show>, sql_conn: &Connection) {
 
     match prompt_menu(selections) {
         0 => handle_available_subscriptions(shows, &sql_conn),
-        1 => handle_my_subscriptions(shows, &sql_conn),
+        1 => handle_my_subscriptions(shows),
         2 => println!("{}", selections[2]),
         _ => println!("Fail"),
     }
@@ -127,37 +134,40 @@ fn prompt_menu(selections: &[&'static str]) -> usize {
     Select::with_theme(&ColorfulTheme::default())
         .with_prompt("Choose an option")
         .default(0)
-        .items(&selections[..])
+        .items(&selections)
         .interact()
         .unwrap()
 }
 
 fn handle_available_subscriptions(shows: HashMap<String, Show>, sql_conn: &Connection) {
-    let titles: Vec<&str> = shows
+    let mut titles: Vec<&str> = shows
         .values()
         .filter(|show| show.subscribed == Some(0))
-        .map(|show| show.title.as_ref())
+        .map(|show| show.title.as_ref())        
         .collect();
+    titles.sort();
     let titles: &[&str] = &titles;
 
     let checks = Checkboxes::with_theme(&ColorfulTheme::default())
         .with_prompt("Pick your subscriptions")
-        .items(&titles[..])
+        .items(&titles)
         .interact()
         .unwrap();
 
     for check in checks {
-        subscribe_to_show(&sql_conn, check as u32);
-        println! {"Subcribed to: {}", titles[check]};
+        let selected_show = shows.get(titles[check]).unwrap();
+        subscribe_to_show(&sql_conn, &selected_show.id.unwrap());
+        println! {"Subcribed to: {}", &selected_show.title};
     }
 }
 
-fn handle_my_subscriptions(shows: HashMap<String, Show>, sql_conn: &Connection) {
-    let show_titles: Vec<&str> = shows
+fn handle_my_subscriptions(shows: HashMap<String, Show>) {
+    let mut show_titles: Vec<&str> = shows
         .values()
         .filter(|show| show.subscribed == Some(1))
         .map(|show| show.title.as_ref())
         .collect();
+    show_titles.sort();
     let show_titles: &[&str] = &show_titles;
 
     let show_selection = Select::with_theme(&ColorfulTheme::default())
@@ -167,14 +177,15 @@ fn handle_my_subscriptions(shows: HashMap<String, Show>, sql_conn: &Connection) 
         .interact()
         .unwrap();
 
-    let empty_vec: Vec<Episode> = vec![];
+    let empty_hashmap: HashMap<String, Episode> = HashMap::new();
     let show = shows.get(show_titles[show_selection]).unwrap();
     let episodes = &show.episodes;
     let episodes = match episodes {
         Some(eps) => eps,
-        None => &empty_vec,
+        None => &empty_hashmap,
     };
-    let episode_titles: Vec<&str> = episodes.iter().map(|ep| ep.title.as_ref()).collect();
+    let mut episode_titles: Vec<&str> = episodes.keys().map(AsRef::as_ref).collect();
+    episode_titles.sort();
     let episode_titles: &[&str] = &episode_titles;
 
     let episode_selection = Select::with_theme(&ColorfulTheme::default())
@@ -184,13 +195,10 @@ fn handle_my_subscriptions(shows: HashMap<String, Show>, sql_conn: &Connection) 
         .interact()
         .unwrap();
 
-    for episode in episodes
-        .iter()
-        .filter(|ep| ep.title == episode_titles[episode_selection])
-    {
-        println!("Loading episode {} {}", TRUCK, &episode.title);
-        open_episode(episode.torrent_link.clone());
-    }
+    let selected_episode = episodes.get(episode_titles[episode_selection]).unwrap();
+
+    println!("Loading episode {} {}", TRUCK, &selected_episode.title);
+    open_episode(selected_episode.torrent_link.clone());
 }
 
 fn load_data(sql_conn: &Connection) -> Result<(), Error> {
@@ -199,7 +207,7 @@ fn load_data(sql_conn: &Connection) -> Result<(), Error> {
     let titles = fetch_current_season_titles()?;
 
     for title in titles {
-        sql_conn.execute("INSERT OR IGNORE INTO shows (title) VALUES (?1)", &[title])?;
+        sql_conn.execute("INSERT OR IGNORE INTO shows (title) VALUES (?1)", &[title.trim()])?;
     }
 
     let episodes = fetch_episodes()?;
@@ -210,17 +218,28 @@ fn load_data(sql_conn: &Connection) -> Result<(), Error> {
 }
 
 fn persist_new_episodes(sql_conn: &Connection, episodes: Vec<Episode>) {
+    let subscribed_titles = fetch_subscribed_titles(&sql_conn);
+
     for ep in episodes {
-        sql_conn.execute(
-            "INSERT OR IGNORE INTO episodes (show_id, title, resolution, torrent_link)
+        sql_conn
+            .execute(
+                "INSERT OR IGNORE INTO episodes (show_id, title, resolution, torrent_link)
                         VALUES ((SELECT id FROM shows WHERE title = ?1), ?2, ?3, ?4)",
-            &[
-                &parse_show_name_from_torrent_title(&ep.title).unwrap(),
-                &ep.title,
-                parse_resolution_from_title(&ep.title).unwrap().to_str().unwrap(),
-                &ep.torrent_link,
-            ],
-        ).unwrap();
+                &[
+                    &parse_show_name_from_torrent_title(&ep.title).unwrap(),
+                    &ep.title,
+                    parse_resolution_from_title(&ep.title)
+                        .unwrap()
+                        .to_str()
+                        .unwrap(),
+                    &ep.torrent_link,
+                ],
+            )
+            .unwrap();
+
+        if subscribed_titles.contains(&parse_show_name_from_torrent_title(&ep.title).unwrap()) {
+            println!("{}{}", style("[NEW EPISODE ARRIVAL: ]").bold().dim(), style(&ep.title).bold().dim())
+        }
     }
 }
 
@@ -255,16 +274,17 @@ fn watch_feed() {
     let mut current_feed_string = "".to_string();
 
     loop {
-        let feed = Channel::from_url("https://nyaa.si/?page=rss&c=0_0&f=0&u=HorribleSubs").unwrap();        
-        let new_feed_string = feed.to_string();        
+        let feed = Channel::from_url("https://nyaa.si/?page=rss&c=0_0&f=0&u=HorribleSubs").unwrap();
+        let new_feed_string = feed.to_string();
 
-        if (current_feed_string != new_feed_string) { // https://github.com/rust-syndication/rss/issues/74
+        if current_feed_string != new_feed_string {
+            // https://github.com/rust-syndication/rss/issues/74
             persist_new_episodes(&sql_conn, map_feed_to_episodes(&feed));
             current_feed_string = new_feed_string;
         }
 
-        thread::sleep_ms(5000);
-    }        
+        thread::sleep(std::time::Duration::from_secs(5));
+    }
 }
 
 fn fetch_episodes() -> Result<Vec<Episode>, Error> {
@@ -299,7 +319,7 @@ fn parse_show_name_from_torrent_title(title: &str) -> Result<String, Error> {
     let horrible_subs_prefix = "[HorribleSubs]";
     let prefix_length = horrible_subs_prefix.chars().count();
 
-    return Ok(title[prefix_length..].split('-').collect::<Vec<&str>>()[0]
+    return Ok(title[prefix_length..].split(" - ").collect::<Vec<&str>>()[0]
         .trim()
         .to_string());
 }
@@ -373,7 +393,9 @@ fn load_shows(conn: &Connection) -> Result<HashMap<String, Show>, Error> {
                             id: row.get(0),
                             title: show_title,
                             subscribed: row.get(2),
-                            episodes: Some(vec![episode]),
+                            episodes: Some(
+                                [(episode.title.clone(), episode)].iter().cloned().collect(),
+                            ),
                         },
                     );
                 }
@@ -387,7 +409,7 @@ fn load_shows(conn: &Connection) -> Result<HashMap<String, Show>, Error> {
     return Ok(shows);
 }
 
-fn subscribe_to_show(sql_conn: &Connection, id: u32) {
+fn subscribe_to_show(sql_conn: &Connection, id: &u32) {
     println!("subscribing to id: {}", id);
 
     sql_conn
@@ -398,4 +420,22 @@ fn subscribe_to_show(sql_conn: &Connection, id: u32) {
             &[id],
         )
         .unwrap();
+}
+
+fn fetch_subscribed_titles(sql_conn: &Connection) -> Vec<String> {
+    let mut subscribed_shows_select = sql_conn
+        .prepare("SELECT title FROM shows WHERE subscribed = 1")
+        .unwrap();
+
+    let titles = subscribed_shows_select
+        .query_map(NO_PARAMS, |row| -> String { row.get(0) })
+        .unwrap();
+
+    let mut empty_vec: Vec<String> = vec!();     
+
+    for title in titles {
+        empty_vec.push(title.unwrap());
+    }
+
+    empty_vec
 }
