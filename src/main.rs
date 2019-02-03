@@ -143,7 +143,7 @@ fn handle_available_subscriptions(shows: HashMap<String, Show>, sql_conn: &Conne
     let mut titles: Vec<&str> = shows
         .values()
         .filter(|show| show.subscribed == Some(0))
-        .map(|show| show.title.as_ref())        
+        .map(|show| show.title.as_ref())
         .collect();
     titles.sort();
     let titles: &[&str] = &titles;
@@ -207,12 +207,11 @@ fn load_data(sql_conn: &Connection) -> Result<(), Error> {
     let titles = fetch_current_season_titles()?;
 
     for title in titles {
-        sql_conn.execute("INSERT OR IGNORE INTO shows (title) VALUES (?1)", &[title.trim()])?;
+        sql_conn.execute(
+            "INSERT OR IGNORE INTO shows (title) VALUES (?1)",
+            &[title.trim()],
+        )?;
     }
-
-    let episodes = fetch_episodes()?;
-
-    persist_new_episodes(&sql_conn, episodes);
 
     Ok(())
 }
@@ -221,7 +220,7 @@ fn persist_new_episodes(sql_conn: &Connection, episodes: Vec<Episode>) {
     let subscribed_titles = fetch_subscribed_titles(&sql_conn);
 
     for ep in episodes {
-        sql_conn
+        let updated_rows = sql_conn
             .execute(
                 "INSERT OR IGNORE INTO episodes (show_id, title, resolution, torrent_link)
                         VALUES ((SELECT id FROM shows WHERE title = ?1), ?2, ?3, ?4)",
@@ -237,8 +236,14 @@ fn persist_new_episodes(sql_conn: &Connection, episodes: Vec<Episode>) {
             )
             .unwrap();
 
-        if subscribed_titles.contains(&parse_show_name_from_torrent_title(&ep.title).unwrap()) {
-            println!("{}{}", style("[NEW EPISODE ARRIVAL: ]").bold().dim(), style(&ep.title).bold().dim())
+        if updated_rows > 0
+            && subscribed_titles.contains(&parse_show_name_from_torrent_title(&ep.title).unwrap())
+        {
+            println!(
+                "{}{}",
+                style("[NEW EPISODE ARRIVAL: ]").bold().dim(),
+                style(&ep.title).bold().dim()
+            );
         }
     }
 }
@@ -312,16 +317,18 @@ fn parse_resolution_from_title(title: &str) -> Result<Resolution, Error> {
     let regex = Regex::new(r"(?x)(?P<res>([0-1][0-8][0-8][0]p|[4-7][2-8][0]p))")?;
     let captures = regex.captures(title).unwrap();
 
-    return Resolution::from_string(captures["res"].to_string());
+    Resolution::from_string(captures["res"].to_string())
 }
 
 fn parse_show_name_from_torrent_title(title: &str) -> Result<String, Error> {
     let horrible_subs_prefix = "[HorribleSubs]";
     let prefix_length = horrible_subs_prefix.chars().count();
 
-    return Ok(title[prefix_length..].split(" - ").collect::<Vec<&str>>()[0]
-        .trim()
-        .to_string());
+    Ok(
+        title[prefix_length..].split(" - ").collect::<Vec<&str>>()[0]
+            .trim()
+            .to_string(),
+    )
 }
 
 fn fetch_current_season_titles() -> Result<Vec<String>, Error> {
@@ -406,7 +413,7 @@ fn load_shows(conn: &Connection) -> Result<HashMap<String, Show>, Error> {
         .unwrap()
         .count();
 
-    return Ok(shows);
+    Ok(shows);
 }
 
 fn subscribe_to_show(sql_conn: &Connection, id: &u32) {
@@ -431,7 +438,7 @@ fn fetch_subscribed_titles(sql_conn: &Connection) -> Vec<String> {
         .query_map(NO_PARAMS, |row| -> String { row.get(0) })
         .unwrap();
 
-    let mut empty_vec: Vec<String> = vec!();     
+    let mut empty_vec: Vec<String> = vec![];
 
     for title in titles {
         empty_vec.push(title.unwrap());
