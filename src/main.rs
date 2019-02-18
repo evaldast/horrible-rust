@@ -1,20 +1,15 @@
 #![deny(clippy::all)]
 #![deny(clippy::pedantic)]
 
-use console::style;
-use console::Style;
+use console::{style, Style};
 use dialoguer::{theme::ColorfulTheme, Checkboxes, Confirmation, Input, Select};
 use failure::Error;
-use kuchiki::traits::*;
-use kuchiki::*;
+use kuchiki::traits::TendrilSink;
+use kuchiki::{ElementData, NodeDataRef, NodeRef};
 use regex::Regex;
 use rss::Channel;
 use rusqlite::{Connection, NO_PARAMS};
-use std::fs;
-use std::io::prelude::*;
-use std::path::Path;
-use std::process::Command;
-use std::thread;
+use std::{fs, io::prelude::Write, path::Path, process::Command, thread};
 
 #[macro_use]
 extern crate failure;
