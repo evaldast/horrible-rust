@@ -428,6 +428,7 @@ fn fetch_current_season_titles(url: &str) -> Result<Vec<String>, Error> {
 
     let titles: Vec<String> = text_content
         .replace("\u{2013}", "-")
+        .replace("\u{2019}", "'")
         .lines()
         .filter_map(|t| {
             if t.is_empty() {
