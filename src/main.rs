@@ -10,10 +10,9 @@ use regex::Regex;
 use rss::Channel;
 use rusqlite::{Connection, NO_PARAMS};
 use std::collections::HashMap;
+use std::fs;
 use std::process::Command;
 use std::thread;
-use std::fs;
-use std::net::SocketAddr;
 
 #[macro_use]
 extern crate failure;
@@ -22,10 +21,12 @@ extern crate serde_derive;
 
 const BACK_SELECTION: &str = "<< BACK";
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 struct UserConfig {
     player_path: String,
-    prefered_resolution: String    
+    show_resolution: String,
+    feed_url: String,
+    current_season_url: String,
 }
 
 #[derive(Debug)]
@@ -41,16 +42,10 @@ struct Episode {
     id: u32,
     show_id: u32,
     title: String,
+    episode: String,
     watched: u8,
-    resolution: Resolution,
+    resolution: String,
     torrent_link: String,
-}
-
-#[derive(Clone, Debug)]
-enum Resolution {
-    Q480p,
-    Q720p,
-    Q1080p,
 }
 
 impl Show {
@@ -68,70 +63,33 @@ impl Show {
     }
 }
 
-trait Str {
-    fn to_str(&self) -> Result<&'static str, ()>;
-    fn from_string(s: String) -> Result<Resolution, Error>;
-}
-
-impl Str for Resolution {
-    fn to_str(&self) -> Result<&'static str, ()> {
-        match self {
-            Resolution::Q480p => Ok("480p"),
-            Resolution::Q720p => Ok("720p"),
-            Resolution::Q1080p => Ok("1080p"),
-        }
-    }
-
-    fn from_string(s: String) -> Result<Resolution, Error> {
-        match s.as_ref() {
-            "480p" => Ok(Resolution::Q480p),
-            "720p" => Ok(Resolution::Q720p),
-            "1080p" => Ok(Resolution::Q1080p),
-            _ => bail!("Resolution::from_string failed"),
-        }
-    }
-}
-
 fn main() {
     let config_str: String = fs::read_to_string("config.toml").unwrap();
     let config: UserConfig = toml::from_str(&config_str).unwrap();
 
-    println!("{:?}", config.player_path);
-
     println!("{}", style("[LOADING..]").bold().on_red());
 
     let sql_conn = Connection::open("main.db").unwrap();
-    //let sql_conn = Connection::open_in_memory()?;
 
-    match initialize_data(&sql_conn) {
+    match initialize_data(&sql_conn, &config.current_season_url) {
         Ok(_) => {}
         Err(e) => println!("{}", e),
     }
 
-    update_last_boot_date(&sql_conn);
+    let config_clone = config.clone();
 
-    thread::spawn(|| {
-        watch_feed();
+    thread::spawn(move || {
+        watch_feed(&config_clone);
     });
 
     println!("{}", style("[LOADING COMPLETE]").bold().on_green());
 
     loop {
-        let shows = load_shows(&sql_conn).unwrap();
-        handle_user(&shows, &sql_conn, &config);
+        handle_user(&sql_conn, &config);
     }
 }
 
-fn update_last_boot_date(sql_conn: &Connection) {
-    sql_conn
-        .execute(
-            "INSERT OR REPLACE INTO settings(id, last_boot_date) VALUES(1 ,date())",
-            NO_PARAMS,
-        )
-        .unwrap();
-}
-
-fn handle_user(shows: &HashMap<String, Show>, sql_conn: &Connection, user_config: &UserConfig) {
+fn handle_user(sql_conn: &Connection, user_config: &UserConfig) {
     let selections = &[
         "Available Subscriptions",
         "My Subscriptions",
@@ -139,8 +97,8 @@ fn handle_user(shows: &HashMap<String, Show>, sql_conn: &Connection, user_config
     ];
 
     match prompt_menu(selections) {
-        0 => handle_available_subscriptions(&shows, &sql_conn),
-        1 => handle_my_subscriptions(&shows, &sql_conn, &user_config),
+        0 => handle_available_subscriptions(&sql_conn, &user_config.show_resolution),
+        1 => handle_my_subscriptions(&sql_conn, &user_config),
         2 => handle_new_episodes(&sql_conn, &user_config),
         _ => println!("Fail"),
     }
@@ -155,8 +113,10 @@ fn prompt_menu(selections: &[&'static str]) -> usize {
         .unwrap()
 }
 
-fn handle_available_subscriptions(shows: &HashMap<String, Show>, sql_conn: &Connection) {
-    if shows.values().count() == 0 {
+fn handle_available_subscriptions(sql_conn: &Connection, user_resolution: &str) {
+    let shows = fetch_shows(&sql_conn).unwrap();
+
+    if shows.keys().count() == 0 {
         println!("{}", style("No available subscriptions").bold().red());
         return;
     }
@@ -183,7 +143,7 @@ fn handle_available_subscriptions(shows: &HashMap<String, Show>, sql_conn: &Conn
     for check in checks {
         let selected_show = &shows[titles[check]];
 
-        subscribe_to_show(&sql_conn, selected_show.id);
+        subscribe_to_show(sql_conn, selected_show.id);
 
         println!(
             "{}{}{}",
@@ -194,35 +154,27 @@ fn handle_available_subscriptions(shows: &HashMap<String, Show>, sql_conn: &Conn
 
         persist_new_episodes(
             &sql_conn,
-            fetch_episodes(&selected_show.title).unwrap(),
+            fetch_episodes_from_feed(&selected_show.title).unwrap(),
             true,
+            user_resolution,
         );
     }
 }
 
-fn handle_my_subscriptions(shows: &HashMap<String, Show>, sql_conn: &Connection, user_config: &UserConfig) {
-    let mut show_titles: Vec<&str> = shows
-        .values()
-        .filter_map(|show| {
-            if show.subscribed == 1 {
-                Some(show.title.as_ref())
-            } else {
-                None
-            }
-        })
-        .collect();
+fn handle_my_subscriptions(sql_conn: &Connection, user_config: &UserConfig) {
+    let mut show_titles = fetch_subscribed_titles(&sql_conn);
 
     if show_titles.is_empty() {
         println!(
             "{}",
             style("No shows found! Please subscribe first").bold().red()
         );
+
         return;
     }
 
     show_titles.sort();
-    show_titles.push(BACK_SELECTION);
-    let show_titles: &[&str] = &show_titles;
+    show_titles.push(BACK_SELECTION.to_string());
 
     loop {
         let show_selection = Select::with_theme(&ColorfulTheme::default())
@@ -236,22 +188,18 @@ fn handle_my_subscriptions(shows: &HashMap<String, Show>, sql_conn: &Connection,
             return;
         }
 
-        handle_episodes(show_titles[show_selection], &shows, &sql_conn, &user_config)
+        handle_episodes(&show_titles[show_selection], &sql_conn, &user_config)
     }
 }
 
-fn handle_episodes(show_title: &str, shows: &HashMap<String, Show>, sql_conn: &Connection, user_config: &UserConfig) {
-    let empty_hashmap: HashMap<String, Episode> = HashMap::new();
-    let show = shows.get(show_title).unwrap();
-    let episodes = &show.episodes;
-    let episodes = match episodes {
-        Some(eps) => eps,
-        None => &empty_hashmap,
-    };
-    let mut available_selections: Vec<&str> = episodes.keys().map(AsRef::as_ref).collect();
+fn handle_episodes(show_title: &str, sql_conn: &Connection, user_config: &UserConfig) {
+    let episodes = fetch_episodes_for_show(sql_conn, show_title, &user_config.show_resolution);
+    let mut available_selections: Vec<String> = episodes
+        .iter()
+        .map(|ep| format!("{} - {}", ep.title, ep.episode))
+        .collect();
     available_selections.sort();
-    available_selections.push(BACK_SELECTION);
-    let available_selections: &[&str] = &available_selections;
+    available_selections.push(BACK_SELECTION.to_string());
 
     let selection = Select::with_theme(&ColorfulTheme::default())
         .with_prompt("Choose an episode")
@@ -264,25 +212,33 @@ fn handle_episodes(show_title: &str, shows: &HashMap<String, Show>, sql_conn: &C
         return;
     }
 
-    let selected_episode = episodes.get(available_selections[selection]).unwrap();
+    let selected_episode = episodes
+        .iter()
+        .find(|ep| format!("{} - {}", ep.title, ep.episode) == available_selections[selection])
+        .unwrap();
+
+    println!("{:?}", selected_episode);
 
     println!(
         "{}{}{}",
         style("[LOADING EPISODE:").bold().magenta(),
-        style(&selected_episode.title).bold().dim(),
+        style(&available_selections[selection]).bold().dim(),
         style("]").bold().magenta()
     );
 
-    match open_episode(selected_episode.torrent_link.clone(), user_config.player_path.to_string()) {
+    match open_episode(
+        selected_episode.torrent_link.clone(),
+        user_config.player_path.to_string(),
+    ) {
         Ok(_) => flag_episode_as_watched(&sql_conn, selected_episode.id),
         Err(error) => println!("{}", error),
     };
 }
 
-fn initialize_data(sql_conn: &Connection) -> Result<(), Error> {
+fn initialize_data(sql_conn: &Connection, current_season_url: &str) -> Result<(), Error> {
     initialize_sql_tables(&sql_conn)?;
 
-    let titles = fetch_current_season_titles()?;
+    let titles = fetch_current_season_titles(current_season_url)?;
 
     for title in &titles {
         sql_conn.execute(
@@ -294,37 +250,47 @@ fn initialize_data(sql_conn: &Connection) -> Result<(), Error> {
     Ok(())
 }
 
-fn persist_new_episodes(sql_conn: &Connection, episodes: Vec<Episode>, watched: bool) {
+fn persist_new_episodes(
+    sql_conn: &Connection,
+    episodes: Vec<Episode>,
+    watched: bool,
+    user_resolution: &str,
+) {
     let subscribed_titles = fetch_subscribed_titles(&sql_conn);
     let watched_value = if watched { "1" } else { "0" };
 
     for ep in episodes {
-        if !subscribed_titles.contains(&parse_show_name_from_torrent_title(&ep.title).unwrap()) {
+        if !subscribed_titles.contains(&ep.title.trim().to_string()) {
             continue;
         }
 
         let updated_rows = sql_conn
             .execute(
-                "INSERT OR IGNORE INTO episodes (show_id, title, resolution, torrent_link, watched)
-                        VALUES ((SELECT id FROM shows WHERE title = ?1), ?2, ?3, ?4, ?5)",
+                "INSERT OR IGNORE INTO episodes (show_id, title, episode, resolution, torrent_link, watched)
+                        VALUES ((SELECT id FROM shows WHERE title = ?1), ?1, ?2, ?3, ?4, ?5)",
                 &[
-                    &parse_show_name_from_torrent_title(&ep.title).unwrap(),
                     &ep.title,
-                    parse_resolution_from_title(&ep.title)
-                        .unwrap()
-                        .to_str()
-                        .unwrap(),
+                    &ep.episode,
+                    &ep.resolution,
                     &ep.torrent_link,
-                    &watched_value,
+                    watched_value,
                 ],
             )
             .unwrap();
 
-        if updated_rows > 0 {
+        if updated_rows > 0 && ep.resolution == user_resolution {
+            let announcement_text = if watched {
+                style("[EPISODE ADDED:").magenta().dim()
+            } else {
+                style("[NEW EPISODE ARRIVAL:").magenta().dim()
+            };
+
             println!(
-                "{}{}{}",
-                style("[NEW EPISODE ARRIVAL:").magenta().dim(),
+                "{}{}{}{}{}",
+                announcement_text,
                 style(&ep.title).bold().dim(),
+                style(" - ").bold().dim(),
+                style(&ep.episode).bold().dim(),
                 style("]").bold().magenta()
             );
         }
@@ -345,21 +311,13 @@ fn initialize_sql_tables(conn: &Connection) -> Result<(), Error> {
         "CREATE TABLE IF NOT EXISTS episodes (
                   id              INTEGER PRIMARY KEY AUTOINCREMENT,
                   show_id         INTEGER NOT NULL,
-                  title           TEXT NOT NULL UNIQUE,
+                  title           TEXT NOT NULL,
+                  episode         TEXT NOT NULL,
                   watched         BOOLEAN DEFAULT 0,
                   resolution      TEXT NOT NULL,
                   torrent_link    TEXT NOT NULL,
-                  FOREIGN KEY(show_id) REFERENCES shows(id)
-                  )",
-        NO_PARAMS,
-    )?;
-
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS settings (
-                  id              INTEGER PRIMARY KEY AUTOINCREMENT,
-                  player_path     TEXT,
-                  prefered_resolution TEXT,
-                  last_boot_date  TEXT
+                  FOREIGN KEY(show_id) REFERENCES shows(id),
+                  CONSTRAINT unique_episode UNIQUE (title, episode, resolution)
                   )",
         NO_PARAMS,
     )?;
@@ -367,18 +325,22 @@ fn initialize_sql_tables(conn: &Connection) -> Result<(), Error> {
     Ok(())
 }
 
-fn watch_feed() {
+fn watch_feed(user_config: &UserConfig) {
     let sql_conn = Connection::open("main.db").unwrap();
     let mut current_feed_string = "".to_string();
 
     loop {
-        let feed = Channel::from_url("https://nyaa.si/?page=rss&c=0_0&f=0&u=HorribleSubs")
-            .expect("Unwrapping channel failed");
+        let feed = Channel::from_url(&user_config.feed_url).expect("Unwrapping channel failed");
         let new_feed_string = feed.to_string();
 
         if current_feed_string != new_feed_string {
             // https://github.com/rust-syndication/rss/issues/74
-            persist_new_episodes(&sql_conn, map_feed_to_episodes(&feed), false);
+            persist_new_episodes(
+                &sql_conn,
+                map_feed_to_episodes(&feed),
+                false,
+                &user_config.show_resolution,
+            );
             current_feed_string = new_feed_string;
         }
 
@@ -386,7 +348,7 @@ fn watch_feed() {
     }
 }
 
-fn fetch_episodes(show_title: &str) -> Result<Vec<Episode>, Error> {
+fn fetch_episodes_from_feed(show_title: &str) -> Result<Vec<Episode>, Error> {
     let feed_url = format!(
         "https://nyaa.si/?page=rss&q={}&c=0_0&f=0&u=HorribleSubs",
         show_title.replace(" ", "+")
@@ -400,43 +362,29 @@ fn fetch_episodes(show_title: &str) -> Result<Vec<Episode>, Error> {
 fn map_feed_to_episodes(feed: &Channel) -> Vec<Episode> {
     feed.items()
         .iter()
-        .map(|i| Episode {
-            id: 0,
-            title: i.title().unwrap().to_string(),
-            show_id: 0,
-            watched: 0,
-            resolution: parse_resolution_from_title(i.title().unwrap()).unwrap(),
-            torrent_link: i.link().unwrap().to_string(),
+        .map(|item| {
+            let captures = capture_variables_from_title(&item);
+
+            Episode {
+                id: 0,
+                title: captures["title"].to_string(),
+                episode: captures["episode"].to_string(),
+                show_id: 0,
+                watched: 0,
+                resolution: captures["resolution"].to_string(),
+                torrent_link: item.link().unwrap().to_string(),
+            }
         })
         .collect()
 }
 
-fn parse_resolution_from_title(title: &str) -> Result<Resolution, Error> {
-    let regex = Regex::new(r"(?x)(?P<res>([0-1][0-8][0-8][0]p|[4-7][2-8][0]p))")?;
-    let captures = regex.captures(title).unwrap();
-
-    Resolution::from_string(captures["res"].to_string())
-}
-
-fn parse_show_name_from_torrent_title(title: &str) -> Result<String, Error> {
-    let horrible_subs_prefix = "[HorribleSubs]";
-    let prefix_length = horrible_subs_prefix.chars().count();
-
-    Ok(
-        title[prefix_length..].split(" - ").collect::<Vec<&str>>()[0]
-            .trim()
-            .to_string(),
-    )
-}
-
-fn fetch_current_season_titles() -> Result<Vec<String>, Error> {
-    let doc = fetch_document("https://horriblesubs.info/current-season/")
-        .ok()
-        .unwrap();
+fn fetch_current_season_titles(url: &str) -> Result<Vec<String>, Error> {
+    let doc = fetch_document(url).ok().unwrap();
     let mut title_selector = doc.select(".shows-wrapper").unwrap();
     let title_wrapper: NodeDataRef<ElementData> = title_selector.next().unwrap();
     let text_content = title_wrapper.text_contents();
     let titles: Vec<String> = text_content
+        .replace("\u{2013}", "-")
         .lines()
         .filter_map(|t| {
             if t.is_empty() {
@@ -471,13 +419,14 @@ fn open_episode(torrent_path: String, player_path: String) -> Result<(), Error> 
     }
 }
 
-fn load_shows(conn: &Connection) -> Result<HashMap<String, Show>, Error> {
+fn fetch_shows(conn: &Connection) -> Result<HashMap<String, Show>, Error> {
     let mut shows: HashMap<String, Show> = HashMap::new();
     let mut current_episodes_select = conn.prepare(
         "SELECT s.id, s.title, s.subscribed, 
             COALESCE(e.id, 0),
             COALESCE(e.show_id, 0),
             COALESCE(e.title, 'NULL'),
+            COALESCE(e.episode, 'NULL'),
             COALESCE(e.watched, 0),
             COALESCE(e.resolution, '480p'),
             COALESCE(e.torrent_link, 'NULL')
@@ -491,9 +440,10 @@ fn load_shows(conn: &Connection) -> Result<HashMap<String, Show>, Error> {
                 id: row.get(3),
                 show_id: row.get(4),
                 title: row.get(5),
-                watched: row.get(6),
-                resolution: Resolution::from_string(row.get(7)).unwrap(),
-                torrent_link: row.get(8),
+                episode: row.get(6),
+                watched: row.get(7),
+                resolution: row.get(8),
+                torrent_link: row.get(9),
             };
 
             let show_title: String = row.get(1);
@@ -508,7 +458,13 @@ fn load_shows(conn: &Connection) -> Result<HashMap<String, Show>, Error> {
                         title: show_title,
                         subscribed: row.get(2),
                         episodes: Some(
-                            [(episode.title.clone(), episode)].iter().cloned().collect(),
+                            [(
+                                format!("{} - {}", episode.title.clone(), episode.episode),
+                                episode,
+                            )]
+                            .iter()
+                            .cloned()
+                            .collect(),
                         ),
                     },
                 );
@@ -545,7 +501,7 @@ fn fetch_subscribed_titles(sql_conn: &Connection) -> Vec<String> {
     let mut empty_vec: Vec<String> = vec![];
 
     for title in titles {
-        empty_vec.push(title.unwrap());
+        empty_vec.push(title.unwrap().trim().to_string());
     }
 
     empty_vec
@@ -559,13 +515,46 @@ fn flag_episode_as_watched(sql_conn: &Connection, episode_id: u32) {
                     WHERE id = ?",
             &[episode_id],
         )
-        .unwrap();    
+        .unwrap();
+}
+
+fn fetch_episodes_for_show(
+    sql_conn: &Connection,
+    show_title: &str,
+    user_resolution: &str,
+) -> Vec<Episode> {
+    let mut new_episodes_select = sql_conn
+        .prepare(
+            "SELECT e.id, e.show_id, e.title, e.episode, e.watched, e.resolution, e.torrent_link
+                FROM shows AS s
+	                JOIN episodes as e ON s.id = e.show_id 
+	            WHERE s.subscribed = 1
+                    AND s.title = ?1
+                    AND e.resolution = ?2",
+        )
+        .unwrap();
+
+    new_episodes_select
+        .query_map(&[show_title, user_resolution], |row| -> Episode {
+            Episode {
+                id: row.get(0),
+                show_id: row.get(1),
+                title: row.get(2),
+                episode: row.get(3),
+                watched: row.get(4),
+                resolution: row.get(5),
+                torrent_link: row.get(6),
+            }
+        })
+        .unwrap()
+        .map(|ep| ep.unwrap())
+        .collect()
 }
 
 fn fetch_new_episodes(sql_conn: &Connection) -> Vec<Episode> {
     let mut new_episodes_select = sql_conn
         .prepare(
-            "SELECT e.id, e.show_id, e.title, e.watched, e.resolution, e.torrent_link
+            "SELECT e.id, e.show_id, e.title, e.episode, e.watched, e.resolution, e.torrent_link
                 FROM shows AS s
 	                JOIN episodes as e ON s.id = e.show_id 
 	            WHERE s.subscribed = 1
@@ -579,9 +568,10 @@ fn fetch_new_episodes(sql_conn: &Connection) -> Vec<Episode> {
                 id: row.get(0),
                 show_id: row.get(1),
                 title: row.get(2),
-                watched: row.get(3),
-                resolution: Resolution::Q480p,
-                torrent_link: row.get(5),
+                episode: row.get(3),
+                watched: row.get(4),
+                resolution: row.get(5),
+                torrent_link: row.get(6),
             }
         })
         .unwrap()
@@ -602,9 +592,11 @@ fn handle_new_episodes(sql_conn: &Connection, user_config: &UserConfig) {
         return;
     }
 
-    let mut episode_titles: Vec<&str> = new_episodes.iter().map(|ep| ep.title.as_ref()).collect();
-    episode_titles.push(BACK_SELECTION);
-    let episode_titles: &[&str] = &episode_titles;
+    let mut episode_titles: Vec<String> = new_episodes
+        .iter()
+        .map(|ep| format!("{} - {}", ep.title, ep.episode))
+        .collect();
+    episode_titles.push(BACK_SELECTION.to_string());
 
     let episode_selection = Select::with_theme(&ColorfulTheme::default())
         .with_prompt("Choose a show")
@@ -619,7 +611,7 @@ fn handle_new_episodes(sql_conn: &Connection, user_config: &UserConfig) {
 
     let selected_episode = new_episodes
         .iter()
-        .find(|ep| ep.title == episode_titles[episode_selection])
+        .find(|ep| format!("{} - {}", ep.title, ep.episode) == episode_titles[episode_selection])
         .unwrap();
 
     println!(
@@ -629,8 +621,17 @@ fn handle_new_episodes(sql_conn: &Connection, user_config: &UserConfig) {
         style("]").bold().magenta()
     );
 
-    match open_episode(selected_episode.torrent_link.clone(), user_config.player_path.to_string()) {
+    match open_episode(
+        selected_episode.torrent_link.clone(),
+        user_config.player_path.to_string(),
+    ) {
         Ok(_) => flag_episode_as_watched(&sql_conn, selected_episode.id),
         Err(error) => println!("{}", error),
     };
+}
+
+fn capture_variables_from_title(feed_item: &rss::Item) -> regex::Captures<'_> {
+    let regex = Regex::new("\\[(?P<subber>.+)\\]\\s*(?P<title>.+?)[\\s*\\-*]+(?P<episode>\\d{1,4}.\\d*)[\\s*]\\[(?P<resolution>\\d{3,4}p)\\](?P<version>v*\\d*)").unwrap();
+
+    regex.captures(feed_item.title().unwrap()).unwrap()
 }
