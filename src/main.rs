@@ -9,7 +9,7 @@ use kuchiki::{ElementData, NodeDataRef, NodeRef};
 use regex::Regex;
 use rss::Channel;
 use rusqlite::{Connection, NO_PARAMS};
-use std::{fs, io::prelude::Write, path::Path, process::Command, thread};
+use std::{fs, io::prelude::Write, path::Path, process::Command, thread, cmp::Ordering};
 
 #[macro_use]
 extern crate failure;
@@ -34,15 +34,40 @@ struct Show {
     subscribed: u8,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Eq)]
 struct Episode {
     id: u32,
     show_id: u32,
     title: String,
     episode: String,
+    version: String,
     watched: u8,
     resolution: String,
     torrent_link: String,
+}
+
+impl Episode {
+    fn formatted_title(&self) -> String {
+        format!("{} - {}{}", self.title, self.episode, self.version)
+    }
+}
+
+impl Ord for Episode {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.episode.cmp(&other.episode)
+    }
+}
+
+impl PartialOrd for Episode {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl PartialEq for Episode {
+    fn eq(&self, other: &Self) -> bool {
+        self.formatted_title() == other.formatted_title()
+    }
 }
 
 fn main() {
@@ -239,14 +264,15 @@ fn handle_my_subscriptions(sql_conn: &Connection, user_config: &Config) -> Resul
 }
 
 fn handle_episodes(show_title: &str, sql_conn: &Connection, user_config: &Config) -> Result<(), Error> {
-    let episodes = fetch_episodes_for_show(sql_conn, show_title, &user_config.show_resolution)?;
+    let mut episodes: Vec<Episode> = fetch_episodes_for_show(sql_conn, show_title, &user_config.show_resolution)?;
+
+    episodes.sort();
 
     let mut available_selections: Vec<String> = episodes
         .iter()
-        .map(|ep| format!("{} - {}", ep.title, ep.episode))
+        .map(|ep| ep.formatted_title())
         .collect();
 
-    available_selections.sort();
     available_selections.push(BACK_SELECTION.to_string());
 
     let selection = Select::with_theme(&ColorfulTheme::default())
@@ -259,10 +285,7 @@ fn handle_episodes(show_title: &str, sql_conn: &Connection, user_config: &Config
         return Ok(());
     }
 
-    let selected_episode = episodes
-        .iter()
-        .find(|ep| format!("{} - {}", ep.title, ep.episode) == available_selections[selection])
-        .unwrap();
+    let selected_episode = &episodes[selection];
 
     println!(
         "{}{}{}",
@@ -358,6 +381,7 @@ fn initialize_sql_tables(conn: &Connection) -> Result<(), Error> {
                   show_id         INTEGER NOT NULL,
                   title           TEXT NOT NULL,
                   episode         TEXT NOT NULL,
+                  version         TEXT NOT NULL DEFAULT '',
                   watched         BOOLEAN DEFAULT 0,
                   resolution      TEXT NOT NULL,
                   torrent_link    TEXT NOT NULL,
@@ -429,6 +453,7 @@ fn map_feed_to_episodes(feed: &Channel) -> Result<Vec<Episode>, Error> {
                 id: 0,
                 title: captures["title"].to_string(),
                 episode: captures["episode"].to_string(),
+                version: captures["version"].to_string(),
                 show_id: 0,
                 watched: 0,
                 resolution: captures["resolution"].to_string(),
@@ -532,7 +557,7 @@ fn fetch_episodes_for_show(
 ) -> Result<Vec<Episode>, Error> {
     let mut new_episodes_select = sql_conn
         .prepare(
-            "SELECT e.id, e.show_id, e.title, e.episode, e.watched, e.resolution, e.torrent_link
+            "SELECT e.id, e.show_id, e.title, e.episode, e.version, e.watched, e.resolution, e.torrent_link
                 FROM shows AS s
 	                JOIN episodes as e ON s.id = e.show_id 
 	            WHERE s.subscribed = 1
@@ -547,9 +572,10 @@ fn fetch_episodes_for_show(
                 show_id: row.get(1),
                 title: row.get(2),
                 episode: row.get(3),
-                watched: row.get(4),
-                resolution: row.get(5),
-                torrent_link: row.get(6),
+                version: row.get(4),
+                watched: row.get(5),
+                resolution: row.get(6),
+                torrent_link: row.get(7),
             }
         })?
         .map(|ep| ep.unwrap())
@@ -561,7 +587,7 @@ fn fetch_episodes_for_show(
 fn fetch_new_episodes(sql_conn: &Connection, config: &Config) -> Result<Vec<Episode>, Error>  {
     let mut new_episodes_select = sql_conn
         .prepare(
-            "SELECT e.id, e.show_id, e.title, e.episode, e.watched, e.resolution, e.torrent_link
+            "SELECT e.id, e.show_id, e.title, e.episode, e.version, e.watched, e.resolution, e.torrent_link
                 FROM shows AS s
 	                JOIN episodes as e ON s.id = e.show_id 
 	            WHERE s.subscribed = 1
@@ -576,9 +602,10 @@ fn fetch_new_episodes(sql_conn: &Connection, config: &Config) -> Result<Vec<Epis
                 show_id: row.get(1),
                 title: row.get(2),
                 episode: row.get(3),
-                watched: row.get(4),
-                resolution: row.get(5),
-                torrent_link: row.get(6),
+                version: row.get(4),
+                watched: row.get(5),
+                resolution: row.get(6),
+                torrent_link: row.get(7),
             }
         })?
         .map(|ep| ep.unwrap())
@@ -598,7 +625,7 @@ fn handle_new_episodes(sql_conn: &Connection, user_config: &Config) -> Result<()
 
     let mut episode_titles: Vec<String> = new_episodes
         .iter()
-        .map(|ep| format!("{} - {}", ep.title, ep.episode))
+        .map(|ep| ep.formatted_title())
         .collect();
 
     episode_titles.push(BACK_SELECTION.to_string());
@@ -613,15 +640,12 @@ fn handle_new_episodes(sql_conn: &Connection, user_config: &Config) -> Result<()
         return Ok(());
     }
 
-    let selected_episode = new_episodes
-        .iter()
-        .find(|ep| format!("{} - {}", ep.title, ep.episode) == episode_titles[episode_selection])
-        .unwrap();
+    let selected_episode = &new_episodes[episode_selection];
 
     println!(
         "{}{}{}",
         style("[LOADING EPISODE:").bold().magenta(),
-        style(&selected_episode.title).bold().dim(),
+        style(&selected_episode.formatted_title()).bold().dim(),
         style("]").bold().magenta()
     );
 
