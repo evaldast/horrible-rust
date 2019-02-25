@@ -111,8 +111,8 @@ fn setup_config() -> Result<Config, Error> {
     };
 
     let config_str: String = fs::read_to_string(CONFIG_FILE_NAME)?;
-    
-    Ok(toml::from_str(&config_str)?)    
+
+    Ok(toml::from_str(&config_str)?)
 }
 
 fn handle_user(sql_conn: &Connection, user_config: &Config) -> Result<(), Error> {
@@ -302,7 +302,10 @@ fn handle_episodes(
         selected_episode.torrent_link.clone(),
         user_config.player_path.to_string(),
     ) {
-        Ok(_) => {flag_episode_as_watched(&sql_conn, selected_episode.id); Ok(())},
+        Ok(_) => {
+            flag_episode_as_watched(&sql_conn, selected_episode.id)?;
+            Ok(())
+        }
         Err(error) => bail!(error),
     }
 }
@@ -426,7 +429,7 @@ fn watch_feed(user_config: &Config) -> Result<(), Error> {
             // https://github.com/rust-syndication/rss/issues/74
             persist_new_episodes(
                 &sql_conn,
-                map_feed_to_episodes(&feed)?,
+                map_feed_to_episodes(&feed),
                 false,
                 &user_config.show_resolution,
             )?;
@@ -445,13 +448,12 @@ fn fetch_episodes_from_feed(show_title: &str) -> Result<Vec<Episode>, Error> {
     );
 
     let feed = Channel::from_url(&feed_url)?;
-    
+
     Ok(map_feed_to_episodes(&feed))
 }
 
 fn map_feed_to_episodes(feed: &Channel) -> Vec<Episode> {
-    feed
-        .items()
+    feed.items()
         .iter()
         .map(|item| {
             let captures = capture_variables_from_title(&item);
@@ -525,10 +527,8 @@ fn subscribe_to_show(sql_conn: &Connection, id: u32) -> Result<(), Error> {
 }
 
 fn fetch_shows(sql_conn: &Connection, subscribed: bool) -> Result<Vec<Show>, rusqlite::Error> {
-    let mut shows_select =
-        sql_conn.prepare("SELECT id, title, subscribed FROM shows WHERE subscribed = ?")?;
-
-    let shows = shows_select
+    sql_conn
+        .prepare("SELECT id, title, subscribed FROM shows WHERE subscribed = ?")?
         .query_map(&[subscribed], |row| -> Show {
             Show {
                 id: row.get(0),
@@ -536,12 +536,13 @@ fn fetch_shows(sql_conn: &Connection, subscribed: bool) -> Result<Vec<Show>, rus
                 subscribed: row.get(2),
             }
         })?
-        .collect();
-
-    shows    
+        .collect()
 }
 
-fn flag_episode_as_watched(sql_conn: &Connection, episode_id: u32) -> Result<usize, rusqlite::Error> {
+fn flag_episode_as_watched(
+    sql_conn: &Connection,
+    episode_id: u32,
+) -> Result<usize, rusqlite::Error> {
     sql_conn.execute(
         "UPDATE episodes
                     SET watched = 1
@@ -555,7 +556,7 @@ fn fetch_episodes_for_show(
     show_title: &str,
     user_resolution: &str,
 ) -> Result<Vec<Episode>, rusqlite::Error> {
-    let mut new_episodes_select = sql_conn
+    sql_conn
         .prepare(
             "SELECT e.id, e.show_id, e.title, e.episode, e.version, e.watched, e.resolution, e.torrent_link
                 FROM shows AS s
@@ -563,9 +564,7 @@ fn fetch_episodes_for_show(
 	            WHERE s.subscribed = 1
                     AND s.title = ?1
                     AND e.resolution = ?2",
-        )?;
-
-    let episodes = new_episodes_select
+        )?
         .query_map(&[show_title, user_resolution], |row| -> Episode {
             Episode {
                 id: row.get(0),
@@ -578,16 +577,14 @@ fn fetch_episodes_for_show(
                 torrent_link: row.get(7),
             }
         })?
-        .collect();
-
-    episodes
+        .collect()
 }
 
 fn fetch_new_episodes(
     sql_conn: &Connection,
     config: &Config,
 ) -> Result<Vec<Episode>, rusqlite::Error> {
-    let mut new_episodes_select = sql_conn
+    sql_conn
         .prepare(
             "SELECT e.id, e.show_id, e.title, e.episode, e.version, e.watched, e.resolution, e.torrent_link
                 FROM shows AS s
@@ -595,9 +592,7 @@ fn fetch_new_episodes(
 	            WHERE s.subscribed = 1
 		            AND e.watched = 0
                     AND e.resolution = ?",
-        )?;
-
-    let episodes = new_episodes_select
+        )?
         .query_map(&[&config.show_resolution], |row| -> Episode {
             Episode {
                 id: row.get(0),
@@ -609,10 +604,8 @@ fn fetch_new_episodes(
                 resolution: row.get(6),
                 torrent_link: row.get(7),
             }
-        })?        
-        .collect();
-
-    episodes        
+        })?
+        .collect()
 }
 
 fn handle_new_episodes(sql_conn: &Connection, user_config: &Config) -> Result<(), Error> {
@@ -652,7 +645,10 @@ fn handle_new_episodes(sql_conn: &Connection, user_config: &Config) -> Result<()
         selected_episode.torrent_link.clone(),
         user_config.player_path.to_string(),
     ) {
-        Ok(_) => {flag_episode_as_watched(&sql_conn, selected_episode.id); Ok(())},
+        Ok(_) => {
+            flag_episode_as_watched(&sql_conn, selected_episode.id)?;
+            Ok(())
+        }
         Err(error) => bail!(error),
     }
 }
