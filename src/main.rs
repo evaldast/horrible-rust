@@ -21,7 +21,7 @@ const CONFIG_FILE_NAME: &str = "config.toml";
 const DB_FILE_NAME: &str = "main.db";
 const AVAILABLE_RESOLUTIONS: &[&str] = &["480p", "720p", "1080p"];
 
-#[derive(Deserialize, Serialize, Clone, Debug)]
+#[derive(Deserialize, Serialize, Clone)]
 struct Config {
     player_path: String,
     show_resolution: String,
@@ -405,15 +405,18 @@ fn initialize_sql_tables(conn: &Connection) -> Result<(), Error> {
 }
 
 fn start_rss_thread(user_config: Config) {
-    thread::spawn(move || match watch_feed(&user_config) {
-        Ok(_) => {}
-        Err(error) => println!(
-            "{} - {}",
-            style("An error occured in RSS thread. Restarting")
-                .bold()
-                .red(),
-            error
-        ),
+    thread::spawn(move || loop {
+        match watch_feed(&user_config) {
+            Ok(_) => {}
+            Err(error) => println!(
+                "{} - {}",
+                style("An error occured in RSS thread. Restarting")
+                    .bold()
+                    .red(),
+                error
+            ),
+        };
+        thread::sleep(std::time::Duration::from_secs(10));
     });
 }
 
